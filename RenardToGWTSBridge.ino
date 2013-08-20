@@ -1,7 +1,7 @@
 // Renard to IR/Mouse Ear Transmission Tool for Arduino
 // (C) 2013 Joni Chu with code contributions from Jonathan Fether and DIYC user Mat er daddy.
 // This product is not endorsed, authorized, or prepared by the manufacturer of the ears.
-// v0.01 NO WARRANTY EXPRESSED OR IMPLIED
+// v0.2 NO WARRANTY EXPRESSED OR IMPLIED
 // 
 /*
 
@@ -32,41 +32,47 @@
 // Documentation (sort of):
 // I. Assumptions:
 //    1. The input serial data stream is Renard (via Vixen or some other equivalent) and that individual RGB values 
-//      are sent in on channels 1-3 for the left ear and (eventually) channels 4-6 for the right ear.
-//    2. The input serial data comes in on pin 10, 8N1 @ 19,200 baud. Currently the serial receive code below is working 
+//      are sent in on channels 1-3 for the left ear and channels 4-6 for the right ear.
+//    2. The input serial data comes in on Serial1, 8N1 @ 2,400 baud. Currently I'm testing serial receive code below  
 //      with a XBee radio as the receiver with another paired XBee radio in an Explorer board as the transmitter attached 
 //      to the Vixen computer. Wiring is such that (for pictures see posting on DIYC):
-//        XBee pin 1 -> Arudino 3.3v
-//        XBee pin 2 -> Arduino pin 10 (RX)
-//        XBee pin 3 -> Arduino pin 11 (TX)
+//        XBee pin 1 -> Arduino 3.3v
+//        XBee pin 2 -> Arduino Serial1 RX
+//        XBee pin 3 -> Arduino Serial2 TX (not used)
 //        XBee pin 10 -> Arduino GND
-//    3. IR LED emitter and cooresponding valued resistor attached to pin 3 and GND. If you want to use a different pin, 
+//    3. IR LED emitter and cooresponding valued resistor attached to pin 40 and GND. If you want to use a different pin, 
 //      adjust the value of IRLedPin accordingly. 
 // II. How's it work?
 //    The incoming Renard serial stream is decoded into RGB values ranging from 0-255. These are then hashed into buckets 
-//    numbered 0-4 which are used as indices into a 3D array of GwtS codes in the 10bit color pallet published on DIYC. 
-//    This is NOT a granular color pallet but is intended to be a v1.0 solution so please don't flame me with how you would 
+//    numbered 0-4 which are used as indices into a 3D array of GwtS codes in the 1-bit color pallet published on DIYC. 
+//    This is NOT a granular color pallet but is intended to be a v1.0-ish solution so please don't flame me with how you would 
 //    have done it better, instead, please feel free to implement your solution and share it. I'd love to use it! :) The 
-//    mapped color values are then send to the IR transmission logic prefaced with 0x91 and 0x0E to indicate the command and 
-//    pallet and appended with the checksum byte as calculated based on the 3 command bytes being sent.
+//    mapped color values are then sent to the IR transmission logic prefaced with 0x91 and 0x0E for both ears or 0x94 and 0x0E
+//    for colors intended for the right ear which indicate the command and pallet and is then appended with the checksum byte as 
+//    calculated based on the 3-5 command bytes being sent.
 //
 // To Do List:
-// - Make it work. :)
-// - Re-add right ear decoding logic once the IR transmission problem is solved
 // - Write some docs and/or add better code comments
 // - Clean things up a bit more and remove copy/paste artifacts
 // - Add Renard start addressing code so the transmitter channels can be inserted anywhere in the Renard controller chain
 // - Add a 4th channel for each of the two ears that, based on intensity level, adjust command sequence to include fade-in, 
 //   fade-out, etc vs the instance on/off that's currently (only) supported
-// - ???
+// - Anything else? Let me know!
 
-#include <SoftwareSerial.h>
 
-#define IRledPin 3 
+// ****** Configurable items below this point ******
+#define IRledPin 40
+bool debug = true;
+// ****** Nothing beyond this point is configurable unless you know what you're doing ******
+
 bool sync;
-SoftwareSerial xbee(10, 11); //RX, TX
 int i = 0;
-
+uint8_t lRedLast   = 0;
+uint8_t lGreenLast = 0;
+uint8_t lBlueLast  = 0;
+uint8_t rRedLast   = 0;
+uint8_t rGreenLast = 0;
+uint8_t rBlueLast  = 0;
 byte codeLookup[5][5][5] = {
   {
    {0x1D, 0x1D, 0x04, 0x04, 0x04},
@@ -107,7 +113,7 @@ byte codeLookup[5][5][5] = {
  
 void setup() {
   delay(10);
-  xbee.begin(2400);
+  Serial1.begin(2400);
   delay(10);
   Serial.begin(19200);
   pinMode(IRledPin, OUTPUT); 
@@ -116,7 +122,7 @@ void setup() {
 }
  
 void wait_for_serial() {
-    while ( ! xbee.available() > 0 ) { }
+    while ( ! Serial1.available() > 0 ) { }
 }
 
 unsigned char calc_crc(unsigned char *data, unsigned char length) {
@@ -170,7 +176,7 @@ int renardReadBytes( uint8_t *bytes, uint8_t bytes_size ) {
  
   for ( bytes_read = 0; bytes_read < bytes_size; ) {
     wait_for_serial();
-    in_byte = xbee.read();
+    in_byte = Serial1.read();
     switch (in_byte) {
       case(0x7E): // We saw the sync byte, start over!
         sync = true;
@@ -181,7 +187,7 @@ int renardReadBytes( uint8_t *bytes, uint8_t bytes_size ) {
  
       case(0x7F): // Escape character, we need to read one more byte to get our actual data
         wait_for_serial();
-        in_byte = xbee.read();
+        in_byte = Serial1.read();
         switch (in_byte) {
             case(0x2F): // renard wants an 0x7D
               in_byte = 0x7D;
@@ -201,7 +207,7 @@ int renardRead( uint8_t *bytes, uint8_t byte_count ) {
  
   while ( ! sync ) {
     wait_for_serial();
-    in_byte = xbee.read();
+    in_byte = Serial1.read();
     if ( in_byte == 0x7E ) // Sync byte signifies start of packet
       sync = true;
   }
@@ -209,7 +215,7 @@ int renardRead( uint8_t *bytes, uint8_t byte_count ) {
   if ( sync ) {
     sync = false;
     wait_for_serial();
-    in_byte = xbee.read();
+    in_byte = Serial1.read();
     if ( in_byte == 0x80 ) { // Read from here 
       return renardReadBytes(bytes, byte_count);
     }
@@ -220,7 +226,6 @@ int renardRead( uint8_t *bytes, uint8_t byte_count ) {
 void loop() {
   byte cmdbuf[32];
   int cmdcount = 0;
- // int i = 0;
   unsigned char checksum = 0;
   uint8_t bytes[6], bytes_read;
   bytes_read = renardRead(&bytes[0], 6);
@@ -237,36 +242,60 @@ void loop() {
     if (rRed > 4) rRed = 4;
     if (rGreen > 4) rGreen = 4;
     if (rBlue > 4) rBlue = 4;
-
-    Serial.print("Left RGB Values are ");
-    Serial.print(lRed);
-    Serial.print(" ");
-    Serial.print(lGreen);
-    Serial.print(" ");
-    Serial.println(lBlue);
+    if (debug) {
+      Serial.print("Left RGB Values are ");
+      Serial.print(lRed);
+      Serial.print(" ");
+      Serial.print(lGreen);
+      Serial.print(" ");
+      Serial.println(lBlue);
+      Serial.print("Right RGB Values are ");
+      Serial.print(rRed);
+      Serial.print(" ");
+      Serial.print(rGreen);
+      Serial.print(" ");
+      Serial.println(rBlue);
+    }
     char tempArray[2];
-    tempArray[0] = '9';
-    tempArray[1] = '1';
-    cmdbuf[0] = bytefromhex(tempArray); //0x91;
-    tempArray[0] = '0';
-    tempArray[1] = 'E';
-    cmdbuf[1] = bytefromhex(tempArray); //0x0E;
-    cmdbuf[2] = codeLookup[lRed][lGreen][lBlue];
-    cmdcount = 3;
-    checksum = calc_crc(cmdbuf, cmdcount);
-   // i=0;
-  //while (i < 3) {
-   // Serial.print("cmdbuf is ");
-    //Serial.println(cmdbuf[i]);
-    //i++;
- // }
-  delay(100);
-  i=0;
+    if ((lRed == rRed) && (lGreen == rGreen) && (lBlue == rBlue)) {
+      tempArray[0] = '9';
+      tempArray[1] = '1';
+      cmdbuf[0] = bytefromhex(tempArray); //0x91;
+      tempArray[0] = '0';
+      tempArray[1] = 'E';
+      cmdbuf[1] = bytefromhex(tempArray); //0x0E;
+      cmdbuf[2] = codeLookup[lRed][lGreen][lBlue]; // Color code for both ears
+      cmdcount = 3;
+      checksum = calc_crc(cmdbuf, cmdcount);
+    }
+    else {
+      if (debug) {
+        Serial.println("*** ABOVE IS DIFFERENT ***");
+      }
+      tempArray[0] = '9';
+      tempArray[1] = '4';
+      cmdbuf[0] = bytefromhex(tempArray); //0x91;
+      tempArray[0] = '0';
+      tempArray[1] = 'E';
+      cmdbuf[1] = bytefromhex(tempArray); //0x0E;
+      cmdbuf[2] = codeLookup[lRed][lGreen][lBlue]; // Color code for the left ear
+      tempArray[0] = '0';
+      tempArray[1] = 'E';
+      cmdbuf[3] = bytefromhex(tempArray); //0x0E;
+      cmdbuf[4] = codeLookup[rRed][rGreen][rBlue]; // Add 0x80 to color code for the right ear
+      tempArray[0] = '8';
+      tempArray[1] = '0';
+      cmdbuf[4] = cmdbuf[4] + bytefromhex(tempArray);
+      cmdcount = 6;
+      checksum = calc_crc(cmdbuf, cmdcount);
+    }
+    i=0;
     while (i < cmdcount) {
       sendbyte(cmdbuf[i++]);
     }
     sendbyte(checksum);
   }
 }
+
 
 
